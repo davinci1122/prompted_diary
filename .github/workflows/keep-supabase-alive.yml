@@ -1,6 +1,10 @@
 # Supabaseの無料プロジェクトが「放置による自動一時停止」されないように、
 # 定期的にデータベースへ軽いAPIリクエスト（entriesテーブルを1件SELECT）を送るワークフロー。
 #
+# ＋ このワークフロー自身が「60日リポジトリ無更新で自動無効化される」のを防ぐため、
+#    実行のたびに小さなハートビート用ファイルを更新してコミットします（＝リポジトリ活動を作る）。
+#    これにより、あなたがアプリを一切更新しなくても、この自動処理は止まりません。
+#
 # ここに書いてある anon キーは「公開用の鍵」で、もともと index.html に公開済みのものです。
 # （RLS＝行レベルセキュリティで保護されているため、公開されていても他人のデータは読めません）
 # もし将来 Supabase 側でキーを再発行（rotate）した場合は、下の SUPABASE_ANON_KEY も更新してください。
@@ -15,10 +19,18 @@ on:
   # 「Actions」画面から手動でも実行できるようにする（動作テスト用）。
   workflow_dispatch:
 
+# このワークフローがリポジトリへコミット（push）できるように書き込み権限を付与。
+permissions:
+  contents: write
+
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
+      # コミット＆pushするためにリポジトリを取得（push用の認証情報も一緒に保存される）。
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Ping Supabase REST API
         env:
           SUPABASE_URL: "https://rusiuqevmadfgilwcnfk.supabase.co"
@@ -44,4 +56,26 @@ jobs:
           else
             echo "❌ 失敗：Supabaseが想定外の応答を返しました（プロジェクトが既に停止している可能性があります）"
             exit 1
+          fi
+
+      # ▼ ここが「60日で自動無効化されない」ための対策 ▼
+      # 実行のたびにタイムスタンプを書き込んでコミットし、リポジトリに活動を作る。
+      - name: Update heartbeat (prevents 60-day auto-disable)
+        run: |
+          mkdir -p .github
+          echo "last keepalive run (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')" > .github/keepalive-heartbeat.txt
+
+          # コミット主を GitHub Actions bot に設定
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/keepalive-heartbeat.txt
+          # 変更が無い場合（同じ内容）でもエラーにならないようにする
+          if git diff --staged --quiet; then
+            echo "変更なし：コミットをスキップ"
+          else
+            # [skip ci] を付けて、このコミットが余計なワークフローを呼ばないようにする
+            git commit -m "chore: keepalive heartbeat [skip ci]"
+            git push
+            echo "✅ ハートビートをコミットしました（60日ルールのカウントをリセット）"
           fi
